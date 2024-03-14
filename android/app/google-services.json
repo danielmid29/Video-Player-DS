@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "62178366962",
+    "project_id": "video-player-ds",
+    "storage_bucket": "video-player-ds.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:62178366962:android:b225957ec07ce740a6076b",
+        "android_client_info": {
+          "package_name": "com.video.player.sync.video_player_ds"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDyXus3FFdqYOKTq3hPEAnNNerPlxss_6E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
