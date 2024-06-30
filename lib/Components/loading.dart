@@ -2,23 +2,19 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:camera/camera.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_spinkit/flutter_spinkit.dart';
+import 'package:internet_connection_checker/internet_connection_checker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart' as p;
 import 'package:video_player/video_player.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'dart:convert';
-import 'package:intl/intl.dart';
+import 'package:googleapis/drive/v2.dart' as v2;
+import 'package:dio/dio.dart';
 
-import 'DetectFaces.dart';
-import 'DetectLocation.dart';
+import 'GoogleAuthClient.dart';
 
 class Loading extends StatefulWidget {
   const Loading({Key? key}) : super(key: key);
@@ -28,483 +24,266 @@ class Loading extends StatefulWidget {
 }
 
 List<String?> systemFileNames = [];
-List<CameraDescription> cameras = [];
 
 class _LoadingState extends State<Loading> {
   bool loading = false;
-  var response = [];
-  VideoPlayerController? _controller =
+
+  VideoPlayerController _controller =
       VideoPlayerController.asset("assets/loading.mp4");
+  late VoidCallback listener;
   int index = 0;
-  DetectFaces detectFaces = DetectFaces();
-  late String currentCity;
-  final storage = const FlutterSecureStorage();
-  String? videoName = '';
+
+  final String _clientId =
+      '62178366962-svi1sjho7f40aug610hjlojcrfk6csc7.apps.googleusercontent.com';
+  final String _clientSecret = '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';
+  final String _refreshToken =
+      '1//0gLu1dURyDe6yCgYIARAAGBASNwF-L9IrNc_ePMlstR_RDTgYYz06nSpb1Ih226KDNZPGRU4BczJhiGrZQlcTS3EM2NMtRV_ti5k';
+
+  void getPermissions() async {
+    AndroidDeviceInfo build = await DeviceInfoPlugin().androidInfo;
+    print('Android Version : ${build.version.release}');
+    if (build.version.sdkInt > 33) {
+      var re = await p.Permission.manageExternalStorage.request();
+      if (!re.isGranted) {
+        getPermissions();
+      } else {
+        syncDriveFiles();
+      }
+    } else if (build.version.release == '13') {
+      if (!await p.Permission.photos.isGranted) {
+        p.Permission.photos.request();
+      } else {
+        syncDriveFiles();
+      }
+    } else {
+      if (!await p.Permission.storage.isGranted) {
+        p.Permission.storage.request();
+      } else {
+        syncDriveFiles();
+      }
+    }
+  }
+
+  void _initiateVideoController(String? videoPath) {
+    _controller.dispose();
+    if (videoPath == null) {
+      _controller = VideoPlayerController.asset("assets/loading.mp4");
+    } else {
+      _controller = VideoPlayerController.file(File(videoPath!))
+        ..initialize()
+        ..setVolume(1.0)
+        ..play();
+
+      setState(() {});
+    }
+  }
+
+  late Timer runSync;
+  int timerSecs = 15;
+
+  void initiateTimer(int seconds) {
+    runSync = Timer.periodic(Duration(seconds: seconds), (timer) {
+      getPermissions();
+    });
+  }
 
   @override
   void initState() {
-    super.initState();
-    authenticateUser("testuser", "password");
-    loadCachedLibraryFiles();
     getPermissions();
-    initiateTimer(150);
-    detectFaces.initiateCameraTimer();
-    _controller?.addListener(_videoListener);
+    initiateTimer(30);
+    print(_controller.value.duration);
+    super.initState();
   }
 
   @override
   void dispose() {
-    _controller?.removeListener(_videoListener);
-    _controller?.dispose();
-    runSync.cancel();
-    stateSync.cancel();
     super.dispose();
-  }
-
-  late Timer runSync;
-  late Timer stateSync;
-  void initiateTimer(int seconds) {
-    runSync = Timer.periodic(Duration(seconds: seconds), (timer) {
-      loadCachedLibraryFiles();
-      getPermissions();
-      getLocation();
-    });
-    stateSync = Timer.periodic(const Duration(seconds: 1), (timer) {
-      setStateInitializer();
-      loadCachedLibraryFiles();
-    });
-  }
-
-  bool _isChangingVideo = false;
-
-  void _initiateVideoController(String? videoPath) {
-    if (kDebugMode) {
-      print("_initiateVideoController $videoPath");
-      print("_initiateVideoController $_isChangingVideo");
-    }
-    if (_isChangingVideo &&
-        _controller != null &&
-        _controller!.value.isInitialized &&
-        _controller!.value.isPlaying) return;
-    _isChangingVideo = true;
-
-    if (_controller != null && _controller!.value.isInitialized) {
-      _controller?.removeListener(_videoListener);
-      _controller?.dispose();
-      _controller = null; // Set the controller to null after disposing
-    }
-
-    print("init video response : $videoPath $response");
-
-    if (videoPath == null || response.isEmpty) {
-      _controller = VideoPlayerController.asset("assets/loading.mp4");
-      _controller?.initialize().then((_) {
-        if (mounted) {
-          setState(() {
-            _controller?.play();
-          });
-        }
-        _controller?.addListener(_videoListener);
-        _isChangingVideo = false;
-        videoName = '';
-      });
-    } else {
-      if (kDebugMode) {
-        print(videoPath);
-      }
-      DateTime now = DateTime.now();
-      String currentTime = DateFormat.Hms().format(now);
-      String currentDay = DateFormat.EEEE().format(now);
-      print(currentDay);
-      bool videoFound = false;
-      if (kDebugMode) {
-        print(response);
-      }
-
-      int loop = 0;
-      for (var data in response) {
-        String videoName = data['videoName'];
-        String fromTime = data['fromTime'];
-        String toTime = data['toTime'];
-        String weekAvailability = data['weekAvailability'];
-        String location = data['location'];
-        bool enable = data['enable'];
-
-        if (kDebugMode) {
-          print(videoPath.contains(videoName));
-        }
-
-        if (videoPath.contains(videoName)) {
-          if (enable &&
-              isWithinTimeRange(currentTime, fromTime, toTime) &&
-              isWithinWeekAvailability(currentDay, weekAvailability) &&
-              (currentCity.contains(location) || location.contains("All"))) {
-            _controller = VideoPlayerController.file(File(videoPath));
-            _controller?.initialize().then((_) {
-              if (mounted) {
-                setState(() {
-                  _controller?.play();
-                });
-              }
-              _isChangingVideo = false;
-            });
-            _controller?.setVolume(1.0);
-            _controller?.addListener(_videoListener);
-            videoFound = true;
-            this.videoName = '';
-            if (kDebugMode) {
-              print('Video is available to play: $videoName');
-            }
-            break;
-          } else {
-            if (kDebugMode) {
-              print('Video is not available to play: $videoName');
-              print(
-                  'Time range: ${isWithinTimeRange(currentTime, fromTime, toTime)}');
-              print(
-                  'Week availability: ${isWithinWeekAvailability(currentDay, weekAvailability)}');
-            }
-          }
-        }
-      }
-
-      if (!videoFound) {
-        _moveToNextVideo(false);
-      }
-    }
-  }
-
-  void _videoListener() {
-    if (!_isChangingVideo &&
-        _controller != null &&
-        _controller!.value.isInitialized &&
-        !_controller!.value.isPlaying &&
-        _controller!.value.position >=
-            _controller!.value.duration - const Duration(milliseconds: 100)) {
-      _moveToNextVideo(true);
-    }
-  }
-
-  void _moveToNextVideo(bool firstLoop) {
-    if (_isChangingVideo &&
-        _controller != null &&
-        _controller!.value.isInitialized &&
-        _controller!.value.isPlaying) return;
-    _isChangingVideo = true;
-
-    setState(() {
-      index++;
-      if (index >= systemFileNames.length) {
-        index = 0;
-      }
-      if (systemFileNames.isNotEmpty) {
-        if (videoName != systemFileNames.elementAt(index)) {
-          if (firstLoop) {
-            videoName = systemFileNames.elementAt(index);
-          }
-          _initiateVideoController(systemFileNames.elementAt(index));
-        } else {
-          videoName = '';
-          _initiateVideoController(null);
-        }
-      } else {
-        _initiateVideoController(null);
-        videoName = '';
-      }
-    });
-  }
-
-  Future<void> getLocation() async {
-    currentCity = await getCurrentCity();
-    await detectFace();
-  }
-
-  Future<void> detectFace() async {
-    await detectFaces.requestCameraPermission();
-    if (systemFileNames.isNotEmpty) {
-      await detectFaces.captureImageAndDetectFaces(
-          systemFileNames[index]!, currentCity, getValidToken);
-    }
-  }
-
-  void getPermissions() async {
-    AndroidDeviceInfo build = await DeviceInfoPlugin().androidInfo;
-    bool permissionGranted = false;
-    if (kDebugMode) {
-      print("sync files");
-    }
-    if (build.version.sdkInt > 33) {
-      var status = await p.Permission.manageExternalStorage.request();
-      permissionGranted = status.isGranted;
-    } else if (build.version.release == '13') {
-      var status = await p.Permission.photos.request();
-      permissionGranted = status.isGranted;
-    } else {
-      var status = await p.Permission.storage.request();
-      permissionGranted = status.isGranted;
-    }
-
-    if (permissionGranted) {
-      if (kDebugMode) {
-        print("Storage permission Granted");
-      }
-      syncLibraryFiles();
-      await getLocation();
-    } else {
-      getPermissions();
-    }
-  }
-
-  void setStateInitializer() {
-    setState(() {});
+    _controller.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    _controller.addListener(() {
+      setState(() {
+        if (!_controller.value.isPlaying &&
+            _controller.value.isInitialized &&
+            (_controller.value.duration == _controller.value.position)) {
+          //checking the duration and position every time
+
+          index++;
+
+          if (systemFileNames.length - 1 < index) {
+            index = 0;
+          }
+
+          if (systemFileNames.isNotEmpty) {
+            _initiateVideoController(systemFileNames.elementAt(index));
+          } else {
+            _initiateVideoController(null);
+          }
+        }
+      });
+    });
+
     return Container(
       color: Colors.white12,
-      child: _controller!.value.isInitialized
+      child: _controller.value.isInitialized
           ? AspectRatio(
-              aspectRatio: _controller!.value.aspectRatio,
-              child: VideoPlayer(_controller!),
+              aspectRatio: _controller.value.aspectRatio,
+              child: VideoPlayer(_controller),
             )
-          : Center(child: getSpinkit()),
+          : Center(
+              child: getSpinkit(),
+            ),
     );
   }
 
   Widget getSpinkit() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const SpinKitSpinningLines(
-            color: Colors.amber,
-            size: 100.0,
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: 50),
-            child: Text(
-              loading ? "Downloading Video ..." : "Loading ...",
-              style: const TextStyle(
-                color: Colors.amber,
-                letterSpacing: 5,
-                fontWeight: FontWeight.w100,
-                fontSize: 25,
-                decoration: TextDecoration.none,
-              ),
+    if (loading) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SpinKitSpinningLines(
+              color: Colors.amber,
+              size: 100.0,
             ),
-          ),
-        ],
-      ),
-    );
+            Padding(
+              padding: EdgeInsets.only(top: 50),
+              child: Text(
+                "Downloading Video ...",
+                style: TextStyle(
+                    color: Colors.amber,
+                    letterSpacing: 5,
+                    fontWeight: FontWeight.w100,
+                    fontSize: 25,
+                    decoration: TextDecoration.none),
+              ),
+            )
+          ],
+        ),
+      );
+    } else {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            SpinKitSpinningLines(
+              color: Colors.amber,
+              size: 100.0,
+            ),
+            Padding(
+              padding: EdgeInsets.only(top: 50),
+              child: Text(
+                "Loading ...",
+                style: TextStyle(
+                    color: Colors.amber,
+                    letterSpacing: 5,
+                    fontWeight: FontWeight.w100,
+                    fontSize: 25,
+                    decoration: TextDecoration.none),
+              ),
+            )
+          ],
+        ),
+      );
+    }
   }
 
-  Future<String?> getValidToken() async {
-    String? token = await storage.read(key: 'jwt_token');
-    String? expiryDateStr = await storage.read(key: 'jwt_token_expiry');
+  void syncDriveFiles() async {
+    List<String?> driveFileNames = [];
 
-    if (token == null || expiryDateStr == null) {
-      return null;
-    }
-
-    DateTime expiryDate = DateTime.parse(expiryDateStr);
-
-    if (DateTime.now().isAfter(expiryDate)) {
-      // Token has expired, authenticate again
-      await authenticateUser('your_username', 'your_password');
-      token = await storage.read(key: 'jwt_token');
-    }
-
-    return token;
-  }
-
-  void syncLibraryFiles() async {
-    if (kDebugMode) {
-      print("Sync videos");
-    }
-    List<String?> libraryFileNames = [];
     Directory? directory = await getExternalStorageDirectory();
     List<FileSystemEntity>? fileSystem = directory?.listSync().toList();
-    systemFileNames = fileSystem?.map((e) => e.path).toList() ?? [];
+    print(fileSystem);
+    systemFileNames = [];
+    fileSystem?.forEach((systemFile) {
+      systemFileNames.add(systemFile.path);
+    });
 
     try {
-      // Get valid JWT token
-      String? token = await getValidToken();
-      if (token == null) {
-        throw Exception('No JWT token found');
-      }
+      final queryParameters = {
+        'client_id': _clientId,
+        'client_secret': _clientSecret,
+        'refresh_token': _refreshToken,
+        'grant_type': 'refresh_token',
+      };
 
-      var url = Uri.parse(
-          'http://ec2-51-20-53-56.eu-north-1.compute.amazonaws.com:8080/keto-motors/api/library/search');
-      final response = await http.get(
-        url,
-        headers: {
-          'Accept': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-      );
-      if (kDebugMode) {
-        print("response : $response");
-      }
-      if (response.statusCode == 200) {
-        var decodedResponse = json.decode(response.body);
-        if (kDebugMode) {
-          print("decodedResponse : $decodedResponse");
-        }
-        for (var singleResponse in decodedResponse) {
-          String videoName = singleResponse['videoName'];
-          int mainId = singleResponse['mainId'];
-          String fileName = '${directory?.path}/$videoName';
-          libraryFileNames.add(fileName);
+      var url = Uri.https('oauth2.googleapis.com', '/token', queryParameters);
 
-          if (!systemFileNames.contains(fileName)) {
+      final response = await http.post(url, headers: Map.of({'Accept': '*/*'}));
+      var decoded = json.decode(response.body);
+      final listFilesParameters = {
+        'q': 'trashed\=false',
+      };
+      String accessToken = decoded['access_token'];
+      var listFilesUri = Uri.https(
+          'www.googleapis.com', '/drive/v3/files/', listFilesParameters);
+
+      final listFilesResponse = await http.get(listFilesUri,
+          headers:
+          Map.of({'Accept': '*/*', 'Authorization': 'Bearer $accessToken'}));
+
+      var lfDecodedResponse = json.decode(listFilesResponse.body);
+
+      for (var singleResponse in lfDecodedResponse['files']) {
+        String name = singleResponse['name'];
+
+        if (name.endsWith('mp4')) {
+          driveFileNames.add('${directory?.path}/$name');
+          if (!systemFileNames.contains('${directory?.path}/$name')) {
             if (systemFileNames.isEmpty) {
               setState(() {
                 loading = true;
               });
             }
-
             final dio = Dio();
-            var videoUrl = Uri.parse(
-                'http://ec2-51-20-53-56.eu-north-1.compute.amazonaws.com:8080/keto-motors/api/library/videos/$mainId');
             await dio
-                .download(videoUrl.toString(), fileName,
-                    options: Options(
-                      method: 'GET',
-                      headers: {
-                        'Authorization': 'Bearer $token',
-                      },
-                    ))
+                .download(
+                'https://www.googleapis.com/drive/v3/files/${singleResponse['id']}/?alt=media',
+                '${directory?.path}/$name',
+                options: Options(
+                    headers: {'Authorization': 'Bearer $accessToken'},
+                    method: 'GET'))
                 .then((value) {
               if (value.statusCode == 200) {
                 setState(() {
                   if (systemFileNames.isEmpty) {
                     loading = false;
-                    _initiateVideoController(fileName);
-                    systemFileNames.add(fileName);
+                    _initiateVideoController('${directory?.path}/$name');
+                    systemFileNames.add('${directory?.path}/$name');
                   }
                 });
               }
             });
           }
         }
-        // Save the response to SharedPreferences
-        SharedPreferences prefs = await SharedPreferences.getInstance();
-        prefs.setString('library_response', response.body);
+      }
 
-        loadCachedLibraryFiles();
-        // Deleting files that are not in the librar
-        List<String> deleteFiles = [];
-        for (var sfName in systemFileNames) {
-          if (!libraryFileNames.contains(sfName)) {
-            File deleteFile = File(sfName!);
-            deleteFile.deleteSync();
-            deleteFiles.add(sfName);
-          }
+      List<String> deleteFiles = [];
+      for (var sfName in systemFileNames) {
+        if (!driveFileNames.contains(sfName)) {
+          File deleteFile = File(sfName!);
+          print(deleteFile.path);
+          deleteFile.deleteSync();
+          deleteFiles.add(sfName);
+          print('Deleted ${deleteFile.path!}');
         }
+      }
 
-        systemFileNames.removeWhere((name) => deleteFiles.contains(name));
-      } else {
-        throw Exception('Failed to fetch library files ${response.statusCode}');
+      for (var del in deleteFiles) {
+        systemFileNames.remove(del);
       }
-    } catch (e) {
-      if (kDebugMode) {
-        print("error fetch : $e");
-      }
-      _videoListener();
+      deleteFiles.clear();
+    }catch(e){
+      print(e.toString());
     }
-
-    if (!_controller!.value.isPlaying) {
+    if (!_controller.value.isPlaying) {
       if (systemFileNames.isNotEmpty) {
         _initiateVideoController(systemFileNames.first);
       } else {
         _initiateVideoController(null);
       }
-    }
-    loadCachedLibraryFiles();
-  }
-
-  // Load the cached response
-  void loadCachedLibraryFiles() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    String? cachedResponse = prefs.getString('library_response');
-
-    if (cachedResponse != null) {
-      response = json.decode(cachedResponse);
-    } else {
-      // No cached response found, handle accordingly
-    }
-  }
-
-  bool isWithinTimeRange(String currentTime, String fromTime, String toTime) {
-    DateTime now = DateFormat.Hms().parse(currentTime);
-    DateTime from = DateFormat.Hms().parse(fromTime);
-    DateTime to = DateFormat.Hms().parse(toTime);
-
-    return now.isAfter(from) && now.isBefore(to);
-  }
-
-  bool isWithinWeekAvailability(String currentDay, String weekAvailability) {
-    List<String> availableDays = [];
-    if (weekAvailability.contains("Weekend")) {
-      availableDays = ["Saturday", "Sunday"];
-    } else if (weekAvailability.contains("All days")) {
-      availableDays = ["Monday", "Sunday"];
-    } else {
-      availableDays = weekAvailability.split(' - ');
-    }
-    if (availableDays.length == 2) {
-      DateTime now = DateTime.now();
-      int currentDayIndex = now.weekday;
-      int startDayIndex = getWeekdayIndex(availableDays[0]);
-      int endDayIndex = getWeekdayIndex(availableDays[1]);
-      return currentDayIndex >= startDayIndex && currentDayIndex <= endDayIndex;
-    }
-    return false;
-  }
-
-  int getWeekdayIndex(String day) {
-    switch (day) {
-      case 'Monday':
-        return DateTime.monday;
-      case 'Tuesday':
-        return DateTime.tuesday;
-      case 'Wednesday':
-        return DateTime.wednesday;
-      case 'Thursday':
-        return DateTime.thursday;
-      case 'Friday':
-        return DateTime.friday;
-      case 'Saturday':
-        return DateTime.saturday;
-      case 'Sunday':
-        return DateTime.sunday;
-      default:
-        return -1;
-    }
-  }
-
-  Future<void> authenticateUser(String username, String password) async {
-    var url = Uri.parse(
-        'http://ec2-51-20-53-56.eu-north-1.compute.amazonaws.com:8080/keto-motors/authenticate');
-    final response = await http.post(
-      url,
-      headers: {'Content-Type': 'application/json'},
-      body: json.encode({'username': username, 'password': password}),
-    );
-
-    if (response.statusCode == 200) {
-      var decodedResponse = json.decode(response.body);
-      String token = decodedResponse['jwt'];
-      // Assume the response contains an expiration time in seconds or milliseconds
-      DateTime expiryDate =
-          DateTime.now().add(const Duration(seconds: 60 * 60 * 24));
-
-      await storage.write(key: 'jwt_token', value: token);
-      await storage.write(
-          key: 'jwt_token_expiry', value: expiryDate.toIso8601String());
-    } else {
-      throw Exception('Failed to authenticate user');
     }
   }
 }
